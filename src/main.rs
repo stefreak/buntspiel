@@ -7,15 +7,14 @@ use adafruit_seesaw::prelude::{EventType, KeypadModule, NeopixelModule};
 use adafruit_seesaw::SeesawRefCell;
 use cyw43_pio::PioSpi;
 use defmt::*;
-use embassy_executor::{InterruptExecutor, Spawner};
+use embassy_executor::{Executor, Spawner};
 use embassy_net::tcp::TcpSocket;
-use embassy_net::{IpEndpoint, Ipv4Address, Stack, StackResources};
+use embassy_net::{IpEndpoint, Ipv4Address};
+use embassy_rp::bind_interrupts;
 use embassy_rp::gpio::{Level, Output};
-use embassy_rp::interrupt::Interrupt;
-use embassy_rp::interrupt::{InterruptExt, Priority};
+use embassy_rp::multicore::spawn_core1;
 use embassy_rp::peripherals::{DMA_CH0, PIO0};
 use embassy_rp::pio::{InterruptHandler, Pio};
-use embassy_rp::{bind_interrupts, interrupt};
 use embassy_time::{Duration, Timer};
 use embedded_io_async::Write;
 use static_cell::StaticCell;
@@ -24,14 +23,6 @@ use {defmt_rtt as _, panic_probe as _};
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
 });
-
-// Medium priority interrupt executor for driving neotrellis display
-static EXECUTOR_NEOTRELLIS: InterruptExecutor = InterruptExecutor::new();
-
-#[interrupt]
-unsafe fn SWI_IRQ_1() {
-    EXECUTOR_NEOTRELLIS.on_interrupt()
-}
 
 const WIFI_NETWORK: &str = "Testturm2";
 const WIFI_PASSWORD: &str = "12345678";
@@ -44,7 +35,7 @@ async fn wifi_task(
 }
 
 #[embassy_executor::task]
-async fn net_task(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
+async fn net_task(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
 }
 
@@ -59,7 +50,6 @@ async fn drive_neotrellis(
         .expect("Failed to start neotrellis");
 
     loop {
-        Timer::after(Duration::from_millis(10)).await;
         let result = neotrellis.poll();
         if result.is_err() {
             info!("neotrellis: error");
@@ -95,6 +85,9 @@ async fn drive_neotrellis(
         }
     }
 }
+
+static mut CORE1_STACK: embassy_rp::multicore::Stack<4096> = embassy_rp::multicore::Stack::new();
+static CORE1_EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -139,12 +132,12 @@ async fn main(spawner: Spawner) {
     let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
 
     // Init network stack
-    static STACK: StaticCell<Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
-    static RESOURCES: StaticCell<StackResources<2>> = StaticCell::new();
-    let stack = &*STACK.init(Stack::new(
+    static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
+    let stack = &*STACK.init(embassy_net::Stack::new(
         net_device,
         config,
-        RESOURCES.init(StackResources::<2>::new()),
+        RESOURCES.init(embassy_net::StackResources::<2>::new()),
         seed,
     ));
 
@@ -154,19 +147,29 @@ async fn main(spawner: Spawner) {
     // Pixelblaze websocket
     unwrap!(spawner.spawn(pixelblaze_websocket(stack)));
 
-    Interrupt::SWI_IRQ_1.set_priority(Priority::P3);
-    let send_spawner = EXECUTOR_NEOTRELLIS.start(interrupt::SWI_IRQ_1);
+    // Non-Async code runs in a thread on the second CPU core
+    spawn_core1(
+        p.CORE1,
+        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+        move || {
+            let executor = CORE1_EXECUTOR.init(Executor::new());
 
-    let mut config = embassy_rp::i2c::Config::default();
-    config.frequency = 50_000;
-    let i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, config);
-    unwrap!(send_spawner.spawn(drive_neotrellis(i2c)));
+            executor.run(|spawner| {
+                let mut config: embassy_rp::i2c::Config = embassy_rp::i2c::Config::default();
+                config.frequency = 50_000;
+                let i2c = embassy_rp::i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, config);
+
+                // TODO: Improve efficiancy by driving neotrellis asynchronously.
+                unwrap!(spawner.spawn(drive_neotrellis(i2c)))
+            });
+        },
+    );
 }
 
 #[embassy_executor::task]
 async fn control_task(
     mut control: cyw43::Control<'static>,
-    stack: &'static Stack<cyw43::NetDriver<'static>>,
+    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
 ) {
     info!("Joining network {}...", WIFI_NETWORK);
     //control.join_open(WIFI_NETWORK).await;
@@ -190,7 +193,7 @@ async fn control_task(
 }
 
 #[embassy_executor::task]
-async fn pixelblaze_websocket(stack: &'static Stack<cyw43::NetDriver<'static>>) -> ! {
+async fn pixelblaze_websocket(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     let mut rx_buffer = [0; 4096];
     let mut tx_buffer = [0; 4096];
 
