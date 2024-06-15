@@ -1,0 +1,32 @@
+{
+  "version": "0.2.0",
+  "configurations": [
+    {
+      "preLaunchTask": "${defaultBuildTask}",
+      "type": "probe-rs-debug",
+      "request": "launch",
+      "name": "Debug Buntspiel",
+      "cwd": "${workspaceFolder}",
+      "flashingConfig": {
+        "flashingEnabled": true,
+      },
+      "chip": "RP2040",
+      "coreConfigs": [
+        {
+          "coreIndex": 0,
+          "programBinary": "${workspaceFolder}/target/thumbv6m-none-eabi/release/buntspiel",
+          "rttEnabled": true,
+          "rttChannelFormats": [
+              {
+                  "channelNumber": 0,
+                  "dataFormat": "Defmt",
+              }
+          ]
+        }
+      ],
+      "env": {
+        "RUST_LOG": "info"
+      },
+    },
+  ]
+}
