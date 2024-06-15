@@ -2,89 +2,18 @@
 #![no_main]
 #![allow(async_fn_in_trait)]
 
-use adafruit_seesaw::devices::{NeoTrellis, SeesawDevice, SeesawDeviceInit};
-use adafruit_seesaw::prelude::{EventType, KeypadModule, NeopixelModule};
-use adafruit_seesaw::SeesawRefCell;
-use cyw43_pio::PioSpi;
-use defmt::*;
+mod neotrellis;
+mod pixelblaze;
+mod wifi;
+
+use defmt::{info, unwrap};
 use embassy_executor::{Executor, Spawner};
-use embassy_net::tcp::TcpSocket;
-use embassy_net::{IpEndpoint, Ipv4Address};
-use embassy_rp::bind_interrupts;
-use embassy_rp::gpio::{Level, Output};
 use embassy_rp::multicore::spawn_core1;
-use embassy_rp::peripherals::{DMA_CH0, PIO0};
-use embassy_rp::pio::{InterruptHandler, Pio};
-use embassy_time::{Duration, Timer};
-use embedded_io_async::Write;
+use neotrellis::drive_neotrellis;
+use pixelblaze::pixelblaze_websocket;
 use static_cell::StaticCell;
+use wifi::init_wifi;
 use {defmt_rtt as _, panic_probe as _};
-
-bind_interrupts!(struct Irqs {
-    PIO0_IRQ_0 => InterruptHandler<PIO0>;
-});
-
-const WIFI_NETWORK: &str = "Testturm2";
-const WIFI_PASSWORD: &str = "12345678";
-
-#[embassy_executor::task]
-async fn wifi_task(
-    runner: cyw43::Runner<'static, Output<'static>, PioSpi<'static, PIO0, 0, DMA_CH0>>,
-) -> ! {
-    runner.run().await
-}
-
-#[embassy_executor::task]
-async fn net_task(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
-    stack.run().await
-}
-
-#[embassy_executor::task]
-async fn drive_neotrellis(
-    i2c: embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C1, embassy_rp::i2c::Blocking>,
-) {
-    let delay = embassy_time::Delay;
-    let seesaw = SeesawRefCell::new(delay, i2c);
-    let mut neotrellis = NeoTrellis::new_with_default_addr(seesaw.acquire_driver())
-        .init()
-        .expect("Failed to start neotrellis");
-
-    loop {
-        let result = neotrellis.poll();
-        if result.is_err() {
-            info!("neotrellis: error");
-            Timer::after(Duration::from_secs(2)).await;
-            continue;
-        }
-        for evt in result.unwrap() {
-            info!(
-                "neutrellis: Event: x={} y={}, {}",
-                evt.x,
-                evt.y,
-                match evt.event {
-                    EventType::Pressed => "Pressed",
-                    EventType::Released => "Released",
-                    _ => "Unknown",
-                }
-            );
-            match evt.event {
-                EventType::Pressed => {
-                    neotrellis
-                        .set_nth_neopixel_color(((evt.y * 4) + evt.x).into(), 0xf, 0xf, 0xf)
-                        .unwrap();
-                    neotrellis.sync_neopixel().unwrap();
-                }
-                EventType::Released => {
-                    neotrellis
-                        .set_nth_neopixel_color(((evt.y * 4) + evt.x).into(), evt.x, 0xf, evt.y)
-                        .unwrap();
-                    neotrellis.sync_neopixel().unwrap();
-                }
-                _ => {}
-            };
-        }
-    }
-}
 
 static mut CORE1_STACK: embassy_rp::multicore::Stack<4096> = embassy_rp::multicore::Stack::new();
 static CORE1_EXECUTOR: StaticCell<Executor> = StaticCell::new();
@@ -95,57 +24,13 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_rp::init(Default::default());
 
-    let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
-    let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
-
-    let pwr = Output::new(p.PIN_23, Level::Low);
-    let cs = Output::new(p.PIN_25, Level::High);
-    let mut pio = Pio::new(p.PIO0, Irqs);
-    let spi: PioSpi<PIO0, 0, DMA_CH0> = PioSpi::new(
-        &mut pio.common,
-        pio.sm0,
-        pio.irq0,
-        cs,
-        p.PIN_24,
-        p.PIN_29,
-        p.DMA_CH0,
-    );
-
-    static STATE: StaticCell<cyw43::State> = StaticCell::new();
-    let state = STATE.init(cyw43::State::new());
-    let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
-    unwrap!(spawner.spawn(wifi_task(runner)));
-
-    control.init(clm).await;
-    control
-        .set_power_management(cyw43::PowerManagementMode::PowerSave)
-        .await;
-
-    let config = embassy_net::Config::dhcpv4(Default::default());
-    //let config = embassy_net::Config::ipv4_static(embassy_net::StaticConfigV4 {
-    //    address: Ipv4Cidr::new(Ipv4Address::new(192, 168, 69, 2), 24),
-    //    dns_servers: Vec::new(),
-    //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
-    //});
-
-    // Generate random seed
-    let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
-
-    // Init network stack
-    static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
-    static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
-    let stack = &*STACK.init(embassy_net::Stack::new(
-        net_device,
-        config,
-        RESOURCES.init(embassy_net::StackResources::<2>::new()),
-        seed,
-    ));
-
-    unwrap!(spawner.spawn(net_task(stack)));
-    unwrap!(spawner.spawn(control_task(control, stack)));
+    let net_stack = init_wifi(
+        spawner, p.PIN_23, p.PIN_25, p.PIO0, p.PIN_24, p.PIN_29, p.DMA_CH0,
+    )
+    .await;
 
     // Pixelblaze websocket
-    unwrap!(spawner.spawn(pixelblaze_websocket(stack)));
+    unwrap!(spawner.spawn(pixelblaze_websocket(net_stack)));
 
     // Non-Async code runs in a thread on the second CPU core
     spawn_core1(
@@ -164,65 +49,4 @@ async fn main(spawner: Spawner) {
             });
         },
     );
-}
-
-#[embassy_executor::task]
-async fn control_task(
-    mut control: cyw43::Control<'static>,
-    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
-) {
-    info!("Joining network {}...", WIFI_NETWORK);
-    //control.join_open(WIFI_NETWORK).await;
-    match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
-        Ok(_) => info!("join successful"),
-        Err(err) => {
-            info!("join failed with status={}", err.status);
-        }
-    }
-
-    // Wait for DHCP, not necessary when using static IP
-    info!("waiting for DHCP...");
-    while !stack.is_config_up() {
-        Timer::after_millis(100).await;
-        control.gpio_set(0, true).await;
-        Timer::after(Duration::from_millis(100)).await;
-        control.gpio_set(0, false).await;
-        Timer::after(Duration::from_millis(100)).await;
-    }
-    info!("DHCP is now up!");
-}
-
-#[embassy_executor::task]
-async fn pixelblaze_websocket(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
-    let mut rx_buffer = [0; 4096];
-    let mut tx_buffer = [0; 4096];
-
-    loop {
-        let mut socket = TcpSocket::new(stack, &mut rx_buffer, &mut tx_buffer);
-        socket.set_timeout(Some(Duration::from_secs(10)));
-
-        info!("Connecting to Pixelblaze http://192.168.4.1:81...");
-        if let Err(e) = socket
-            .connect(IpEndpoint::new(Ipv4Address::new(192, 168, 4, 1).into(), 81))
-            .await
-        {
-            warn!("connect error: {:?}. Trying again in 5 seconds", e);
-            Timer::after(Duration::from_secs(5)).await;
-            continue;
-        }
-
-        info!("Received connection from {:?}", socket.remote_endpoint());
-
-        loop {
-            match socket.write_all("hello".as_bytes()).await {
-                Ok(()) => {}
-                Err(e) => {
-                    warn!("write error: {:?}", e);
-                    break;
-                }
-            };
-
-            Timer::after(Duration::from_millis(1000)).await;
-        }
-    }
 }
