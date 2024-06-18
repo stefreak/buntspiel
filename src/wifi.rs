@@ -17,6 +17,8 @@ bind_interrupts!(struct Irqs {
 const WIFI_NETWORK: &str = "Testturm2";
 const WIFI_PASSWORD: &str = "12345678";
 
+const MAX_SOCKETS: usize = 3;
+
 pub(crate) async fn init_wifi(
     spawner: Spawner,
     pwr: PIN_23,
@@ -25,6 +27,7 @@ pub(crate) async fn init_wifi(
     dio: PIN_24,
     clk: PIN_29,
     dma: DMA_CH0,
+    random_seed: u64,
 ) -> &'static embassy_net::Stack<cyw43::NetDriver<'static>> {
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
@@ -52,17 +55,14 @@ pub(crate) async fn init_wifi(
     //    gateway: Some(Ipv4Address::new(192, 168, 69, 1)),
     //});
 
-    // Generate random seed
-    let seed = 0x0123_4567_89ab_cdef; // chosen by fair dice roll. guarenteed to be random.
-
     // Init network stack
     static STACK: StaticCell<embassy_net::Stack<cyw43::NetDriver<'static>>> = StaticCell::new();
-    static RESOURCES: StaticCell<embassy_net::StackResources<2>> = StaticCell::new();
+    static RESOURCES: StaticCell<embassy_net::StackResources<MAX_SOCKETS>> = StaticCell::new();
     let stack = &*STACK.init(embassy_net::Stack::new(
         net_device,
         config,
-        RESOURCES.init(embassy_net::StackResources::<2>::new()),
-        seed,
+        RESOURCES.init(embassy_net::StackResources::<MAX_SOCKETS>::new()),
+        random_seed,
     ));
 
     unwrap!(spawner.spawn(net_task(stack)));

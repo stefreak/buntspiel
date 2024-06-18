@@ -10,28 +10,29 @@ embassy-executor = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb8
 embassy-sync = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 embassy-time = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 embassy-rp = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
-embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
+#embassy-usb = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 embassy-net = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
-embassy-net-wiznet = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
+#embassy-net-wiznet = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 embassy-futures = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
-embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
+#embassy-usb-logger = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 cyw43 = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 cyw43-pio = { git = "https://github.com/embassy-rs/embassy", rev = "6bbb870bfade23e814169eb48e42e8bc55d9ff8f" }
 
 # Remove this once https://github.com/alexeden/adafruit-seesaw/pull/6 has been merged
 adafruit-seesaw = { git = "https://github.com/tschundler/adafruit-seesaw", rev = "d4cfbea45a2bc1117f6ea57d2347e60a80811505" }
+edge-nal-embassy = { git = "https://github.com/stefreak/edge-net", rev = "479ab2f32387d87ce72d8d8d724f93753be7c95c" }
+edge-ws = { git = "https://github.com/stefreak/edge-net", rev = "479ab2f32387d87ce72d8d8d724f93753be7c95c" }
+edge-http = { git = "https://github.com/stefreak/edge-net", rev = "479ab2f32387d87ce72d8d8d724f93753be7c95c" }
+edge-net = { git = "https://github.com/stefreak/edge-net", rev = "479ab2f32387d87ce72d8d8d724f93753be7c95c" }
 
 [dependencies]
 embassy-embedded-hal = { version = "0.1.0", features = ["defmt"] }
 embassy-sync = { version = "0.6.0", features = ["defmt"] }
-embassy-executor = { version = "0.5.0", features = ["task-arena-size-32768", "arch-cortex-m", "executor-thread", "executor-interrupt", "defmt", "integrated-timers"] }
+embassy-executor = { version = "0.5.0", features = ["arch-cortex-m", "executor-thread","defmt", "integrated-timers", "nightly"] }
 embassy-time = { version = "0.3.1", features = ["defmt", "defmt-timestamp-uptime"] }
-embassy-rp = { version = "0.1.0", features = ["defmt", "unstable-pac", "time-driver", "critical-section-impl"] }
-embassy-usb = { version = "0.2.0", features = ["defmt"] }
+embassy-rp = { version = "0.1.0", features = ["defmt", "time-driver", "critical-section-impl"] }
 embassy-net = { version = "0.4.0", features = ["defmt", "tcp", "udp", "raw", "dhcpv4", "medium-ethernet"] }
-embassy-net-wiznet = { version = "0.1.0", features = ["defmt"] }
 embassy-futures = { version = "0.1.0"  }
-embassy-usb-logger = { version = "0.2.0" }
 cyw43 = { version = "0.1.0", features = ["defmt", "firmware-logs"] }
 cyw43-pio = { version = "0.1.0", features = ["defmt", "overclock"] }
 
@@ -44,14 +45,9 @@ cortex-m = { version = "0.7.6", features = ["inline-asm"] }
 cortex-m-rt = "0.7.0"
 critical-section = "1.1"
 panic-probe = { version = "0.3", features = ["print-defmt"] }
-display-interface-spi = "0.4.1"
-embedded-graphics = "0.7.1"
 st7789 = "0.6.1"
-display-interface = "0.4.1"
 byte-slice-cast = { version = "1.2.0", default-features = false }
-smart-leds = "0.3.0"
 heapless = "0.8"
-usbd-hid = "0.7.0"
 
 embedded-hal-1 = { package = "embedded-hal", version = "1.0" }
 embedded-hal-async = "1.0"
@@ -63,11 +59,13 @@ portable-atomic = { version = "1.5", features = ["critical-section"] }
 log = "0.4"
 pio-proc = "0.2"
 pio = "0.2.1"
-rand = { version = "0.8.5", default-features = false }
-embedded-sdmmc = "0.7.0"
-mfrc522 = { version = "0.7.0", features = ["eh02"] }
-adafruit-seesaw = "0.6.1"
-
+rand = { version = "0.8.5", default-features = false, features = ["small_rng"] }
+# mfrc522 = { version = "0.7.0", features = ["eh02"] }
+adafruit-seesaw = { version = "0.6.1", default-features = false }
+edge-ws = "0.2.0"
+edge-net = { version = "0.7.1" }
+edge-http = "0.2.1"
+edge-nal-embassy = { version = "0.2.0" }
 
 [profile.release]
 debug = 2
