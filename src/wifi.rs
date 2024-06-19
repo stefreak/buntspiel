@@ -1,3 +1,4 @@
+use cyw43::Control;
 use cyw43_pio::PioSpi;
 use defmt::{info, unwrap};
 use embassy_executor::Spawner;
@@ -7,7 +8,7 @@ use embassy_rp::{
     peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0},
     pio::{InterruptHandler, Pio},
 };
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -67,23 +68,35 @@ pub(crate) async fn init_wifi(
 
     unwrap!(spawner.spawn(net_task(stack)));
 
-    info!("Joining network {}...", WIFI_NETWORK);
-    //control.join_open(WIFI_NETWORK).await;
-    match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
-        Ok(_) => info!("join successful"),
-        Err(err) => {
-            info!("join failed with status={}", err.status);
-        }
-    }
-
-    // Wait for DHCP, not necessary when using static IP
-    info!("waiting for DHCP...");
-    while !stack.is_config_up() {
-        Timer::after_millis(500).await;
-    }
-    info!("DHCP is now up!");
+    wait_for_network(&mut control, stack).await;
+    unwrap!(spawner.spawn(control_task(control, stack)));
 
     return stack;
+}
+
+async fn wait_for_network<'d>(
+    control: &'d mut Control<'static>,
+    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
+) {
+    while !stack.is_config_up() {
+        info!("Joining network {}...", WIFI_NETWORK);
+        match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
+            Ok(_) => {
+                info!("join successful");
+            }
+            Err(err) => {
+                info!("join failed with status={}", err.status);
+                continue;
+            }
+        }
+
+        // Wait for DHCP, not necessary when using static IP
+        info!("waiting for DHCP...");
+        while !stack.is_config_up() {
+            Timer::after_millis(500).await;
+        }
+        info!("DHCP is now up!");
+    }
 }
 
 #[embassy_executor::task]
@@ -96,4 +109,15 @@ async fn wifi_task(
 #[embassy_executor::task]
 async fn net_task(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
+}
+
+#[embassy_executor::task]
+async fn control_task(
+    mut control: Control<'static>,
+    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
+) -> ! {
+    loop {
+        wait_for_network(&mut control, stack).await;
+        Timer::after(Duration::from_secs(2)).await;
+    }
 }
