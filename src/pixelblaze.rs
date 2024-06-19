@@ -243,6 +243,10 @@ impl<'b> PixelStreamer {
         mut rng: SmallRng,
     ) -> Result<(), Error> {
         let control_commands = PIXELBLAZE_CONTROL_CHANNEL.receiver();
+
+        // Drain the control command queue when reconnecting.
+        while let Ok(_) = control_commands.try_receive() {}
+
         loop {
             match control_commands.receive().await {
                 PixelblazeControl::SendPong => {
