@@ -66,6 +66,7 @@ edge-ws = "0.2.0"
 edge-net = { version = "0.7.1" }
 edge-http = "0.2.1"
 edge-nal-embassy = { version = "0.2.0" }
+futures = { version = "0.3.30", default-features = false }
 
 [profile.release]
 debug = 2

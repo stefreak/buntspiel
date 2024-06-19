@@ -134,6 +134,7 @@ dependencies = [
  "embedded-storage",
  "fixed",
  "fixed-macro",
+ "futures",
  "heapless 0.8.0",
  "log",
  "panic-probe",

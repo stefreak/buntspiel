@@ -1,15 +1,18 @@
+use core::cell::Cell;
 use core::cmp::min;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::str::from_utf8;
 use core::{u8, usize};
+use edge_net::nal::TcpSplit;
+use futures::try_join;
 
-use defmt::{error, info, warn};
+use defmt::{error, info, warn, Debug2Format};
 use edge_http::io::client::Connection;
 use edge_http::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN, NONCE_LEN};
-use edge_nal_embassy::TcpSocket;
+use edge_nal_embassy::{TcpSocket, TcpSocketRead, TcpSocketWrite};
 use edge_ws::{FrameHeader, FrameType};
 use embassy_net::driver::Driver;
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
@@ -22,9 +25,6 @@ const PIXELBLAZE_WS_ORIGIN: &str = "http://192.168.4.1";
 const PIXELBLAZE_WS_URI: &str = "/";
 const PIXELBLAZE_PORT: u16 = 81;
 const PIXELBLAZE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 4, 1));
-
-const PIXELBLAZE_MSG_GET_CONFIG: &str = r#"{"getConfig":true}"#;
-const PIXELBLAZE_MSG_SEND_UPDATES: &str = r#"{"sendUpdates":true}"#;
 
 // allow max one open TCP socket
 const MAX_SOCKETS: usize = 1;
@@ -39,9 +39,23 @@ pub(crate) static PIXELBLAZE_FRAME_CHANNEL: Channel<
     MAX_FRAMES,
 > = Channel::new();
 
+const MAX_CONTROL: usize = 32; // max control messages waiting in channel
+pub(crate) enum PixelblazeControl {
+    SendPong,
+    SubscribePreviewFrames,
+    GetConfig,
+    Close,
+}
+pub(crate) static PIXELBLAZE_CONTROL_CHANNEL: Channel<
+    CriticalSectionRawMutex,
+    PixelblazeControl,
+    MAX_CONTROL,
+> = Channel::new();
+
 #[derive(Debug, defmt::Format)]
 pub enum Error {
     Error,
+    Close,
 }
 
 impl<E> From<edge_ws::Error<E>> for Error {
@@ -94,7 +108,7 @@ impl From<u8> for PixelblazeMessageType {
 #[embassy_executor::task]
 pub(crate) async fn pixelblaze_task(
     stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
-    mut rng: SmallRng,
+    rng: SmallRng,
 ) -> ! {
     let tcpbuf = edge_nal_embassy::TcpBuffers::new();
     let mut buf = [0_u8; 2048];
@@ -103,9 +117,9 @@ pub(crate) async fn pixelblaze_task(
     loop {
         info!("pixelblaze: connecting...");
         let mut tcp = edge_nal_embassy::Tcp::<_, MAX_SOCKETS>::new(&stack, &tcpbuf);
-        match PixelStreamer::connect(&mut tcp, &mut rng, &mut buf, &mut nonce).await {
-            Ok(mut pixel_streamer) => {
-                if let Err(_) = pixel_streamer.communicate(&PIXELBLAZE_FRAME_CHANNEL).await {
+        match PixelStreamer::connect(&mut tcp, rng.clone(), &mut buf, &mut nonce).await {
+            Ok((pixel_streamer, socket)) => {
+                if let Err(_) = pixel_streamer.communicate(socket, rng.clone()).await {
                     warn!("pixelblaze: WS communication failed",);
                 }
             }
@@ -118,26 +132,22 @@ pub(crate) async fn pixelblaze_task(
     }
 }
 
-struct PixelStreamer<'b> {
-    socket: TcpSocket<'b, MAX_SOCKETS, 1024, 1024>,
-    buf: &'b mut [u8],
-    rng: &'b mut SmallRng,
-    received_frames: u32,
-    dropped_frames: u32,
+struct PixelStreamer {
+    received_frames: Cell<u64>,
+    dropped_frames: Cell<u64>,
 }
-
-impl<'b> PixelStreamer<'b> {
+impl<'b> PixelStreamer {
     async fn connect<'d, D>(
         tcp: &'d mut edge_nal_embassy::Tcp<'d, D, MAX_SOCKETS>,
-        rng: &'d mut SmallRng,
-        buf: &'d mut [u8],
+        mut rng: SmallRng,
+        rx_buf: &'d mut [u8],
         nonce: &'d mut [u8; NONCE_LEN],
-    ) -> Result<PixelStreamer<'d>, Error>
+    ) -> Result<(PixelStreamer, TcpSocket<'d, MAX_SOCKETS, 1024, 1024>), Error>
     where
         D: Driver,
     {
         let mut conn: Connection<_> =
-            Connection::new(buf, tcp, SocketAddr::new(PIXELBLAZE_IP, PIXELBLAZE_PORT));
+            Connection::new(rx_buf, tcp, SocketAddr::new(PIXELBLAZE_IP, PIXELBLAZE_PORT));
 
         rng.fill_bytes(nonce);
 
@@ -163,146 +173,212 @@ impl<'b> PixelStreamer<'b> {
         // Now we have the TCP socket in a state where it can be operated as a WS connection
         // Send some traffic to a WS echo server and read it back
 
-        let (socket, buf) = conn.release();
+        let (socket, _) = conn.release();
 
-        return Ok(PixelStreamer {
+        return Ok((
+            PixelStreamer {
+                received_frames: Cell::new(0),
+                dropped_frames: Cell::new(0),
+            },
             socket,
-            buf,
-            rng,
-            received_frames: 0,
-            dropped_frames: 0,
-        });
+        ));
     }
 
-    async fn communicate<M>(
-        self: &mut Self,
-        channel: &Channel<M, PixelData, MAX_FRAMES>,
-    ) -> Result<(), Error>
-    where
-        M: RawMutex,
-    {
+    async fn communicate(
+        self: &Self,
+        mut socket: TcpSocket<'b, MAX_SOCKETS, 1024, 1024>,
+        rng: SmallRng,
+    ) -> Result<(), Error> {
         info!("pixelblaze: Connection upgraded to WS, starting traffic now");
 
-        // Sending data
+        let (rx, tx) = socket.split();
 
-        self.send_text_frame(PIXELBLAZE_MSG_GET_CONFIG).await?;
-        self.send_text_frame(PIXELBLAZE_MSG_SEND_UPDATES).await?;
+        try_join!(
+            self.monitoring_loop(),
+            self.send_loop(tx, rng),
+            self.receive_loop(rx),
+        )?;
 
-        // receive loop
+        info!("pixelblaze: Closing connection");
+        drop(socket);
+
+        return Ok(());
+    }
+
+    async fn monitoring_loop(self: &Self) -> Result<(), Error> {
+        let control_commands = PIXELBLAZE_CONTROL_CHANNEL.sender();
+
+        // Ask for config first thing in the morning
+        control_commands.send(PixelblazeControl::GetConfig).await;
+
+        let mut last_received_frames: u64 = 0;
+        let mut last_dropped_frames: u64 = 0;
+
         loop {
-            let header = FrameHeader::recv(&mut self.socket).await?;
-            let payload = header.recv_payload(&mut self.socket, self.buf).await?;
+            Timer::after_millis(1000).await;
+
+            // calculate received fps
+            let new_received_frames = self.received_frames.get();
+            let fps_received = new_received_frames - last_received_frames;
+            last_received_frames = new_received_frames;
+            let new_dropped_frames = self.dropped_frames.get();
+            let fps_dropped = new_dropped_frames - last_dropped_frames;
+            last_dropped_frames = new_dropped_frames;
+
+            info!(
+                "pixelblaze: received {} frames (dropped {} frames)",
+                fps_received, fps_dropped,
+            );
+
+            if fps_received < 1 {
+                // use try_send to keep FPS timing accuracy
+                _ = control_commands.try_send(PixelblazeControl::SubscribePreviewFrames)
+            }
+        }
+    }
+
+    async fn send_loop<'d>(
+        self: &Self,
+        mut tx: TcpSocketWrite<'d>,
+        mut rng: SmallRng,
+    ) -> Result<(), Error> {
+        let control_commands = PIXELBLAZE_CONTROL_CHANNEL.receiver();
+        loop {
+            match control_commands.receive().await {
+                PixelblazeControl::SendPong => {
+                    info!("pixelblaze: Sending pong");
+                    let header = FrameHeader {
+                        frame_type: FrameType::Pong,
+                        payload_len: 0,
+                        mask_key: rng.next_u32().into(),
+                    };
+                    header.send(&mut tx).await?;
+                }
+                PixelblazeControl::SubscribePreviewFrames => {
+                    send_text_frame(&mut tx, &mut rng, r#"{"sendUpdates":true}"#).await?;
+                }
+                PixelblazeControl::GetConfig => {
+                    send_text_frame(&mut tx, &mut rng, r#"{"getConfig":true}"#).await?;
+                }
+                PixelblazeControl::Close => {
+                    // Inform the server we are closing the connection
+                    let header: FrameHeader = FrameHeader {
+                        frame_type: FrameType::Close,
+                        payload_len: 0,
+                        mask_key: rng.next_u32().into(),
+                    };
+
+                    header.send(&mut tx).await?;
+
+                    info!("pixelblaze: Closing");
+                    return Err(Error::Close);
+                }
+            }
+        }
+    }
+
+    async fn receive_loop<'d>(self: &Self, mut rx: TcpSocketRead<'d>) -> Result<(), Error> {
+        let mut buf = [0_u8; 2048];
+
+        let control_commands = PIXELBLAZE_CONTROL_CHANNEL.sender();
+
+        loop {
+            let header = FrameHeader::recv(&mut rx).await?;
+            let payload = header.recv_payload(&mut rx, &mut buf).await?;
+
+            if !header.frame_type.is_final() {
+                warn!(
+                    "pixelblaze: Got unexpected fragmented frame: type={} payload={}",
+                    Debug2Format(&header.frame_type),
+                    Debug2Format(&payload)
+                );
+            }
 
             match header.frame_type {
-                FrameType::Text(fragmented) => {
+                FrameType::Text(_) => {
                     if let Ok(payload_str) = from_utf8(payload) {
-                        info!(
-                            "pixelblaze: Got text frame fragmented={}, payload={}",
-                            fragmented, payload_str,
-                        );
+                        info!("pixelblaze: Got text frame payload={}", payload_str,);
                     } else {
                         info!(
-                            "pixelblaze: Got text frame (UTF8 decoding failed) fragmented={}, payload={}",
-                            fragmented, payload,
+                            "pixelblaze: Got text frame (UTF8 decoding failed) payload={}",
+                            payload,
                         );
                     }
                 }
-                FrameType::Binary(fragmented) => {
+                FrameType::Binary(_) => {
                     let t = PixelblazeMessageType::from(payload[0]);
                     if t == PixelblazeMessageType::PreviewFrame {
                         match PreviewFrame::try_from(payload) {
-                            Ok(preview_frame) => self.handle_preview_frame(preview_frame, channel),
+                            Ok(preview_frame) => self.handle_preview_frame(preview_frame),
                             Err(e) => {
                                 error!("pixelblaze: Could not parse preview frame: {}", e)
                             }
                         }
                     } else {
                         info!(
-                            "pixelblaze: Got binary frame fragmented={}, type={} payload={}",
-                            fragmented, t, payload,
+                            "pixelblaze: Got binary frame type={} payload={}",
+                            t, payload,
                         );
                     }
                 }
                 FrameType::Ping => {
                     info!("pixelblaze: Got ping frame",);
-                    let header = FrameHeader {
-                        frame_type: FrameType::Pong,
-                        payload_len: 0,
-                        mask_key: self.rng.next_u32().into(),
-                    };
-
-                    info!("pixelblaze: Sending pong");
-                    header.send(&mut self.socket).await?;
+                    control_commands.send(PixelblazeControl::SendPong).await;
                 }
                 FrameType::Pong => {
                     info!("pixelblaze: Got pong frame",);
                 }
                 FrameType::Close => {
                     info!("pixelblaze: Got close frame",);
-                    // Inform the server we are closing the connection
-                    let header: FrameHeader = FrameHeader {
-                        frame_type: FrameType::Close,
-                        payload_len: 0,
-                        mask_key: self.rng.next_u32().into(),
-                    };
-
-                    info!("pixelblaze: Closing");
-
-                    header.send(&mut self.socket).await?;
-
-                    return Ok(());
+                    control_commands.send(PixelblazeControl::Close).await;
                 }
                 FrameType::Continue(is_final) => {
-                    info!(
-                        "pixelblaze: Got continue frame is_final={} payload={}",
+                    warn!(
+                        "pixelblaze: Got unexpected continue frame is_final={} payload={}",
                         is_final, payload
                     );
                 }
             }
-
-            if !header.frame_type.is_final() {
-                warn!("pixelblaze: Got unexpected fragmented frame");
-            }
         }
     }
 
-    fn handle_preview_frame<M>(
-        self: &mut Self,
-        preview_frame: PreviewFrame,
-        channel: &Channel<M, PixelData, MAX_FRAMES>,
-    ) -> ()
-    where
-        M: RawMutex,
-    {
-        if self.received_frames % 200 == 0 {
+    fn handle_preview_frame(self: &Self, preview_frame: PreviewFrame) -> () {
+        let preview_frames = PIXELBLAZE_FRAME_CHANNEL.sender();
+
+        let received_frames = self.received_frames.get();
+        if received_frames % 200 == 0 {
             info!(
                 "pixelblaze: Received PreviewFrame (sample {}): {}",
                 self.received_frames, preview_frame,
             );
         }
 
-        if let Err(_) = channel.try_send(PixelData::PreviewFrame(preview_frame)) {
-            (self.dropped_frames, _) = self.dropped_frames.overflowing_add(1);
+        if let Err(_) = preview_frames.try_send(PixelData::PreviewFrame(preview_frame)) {
+            self.dropped_frames.set(self.dropped_frames.get() + 1)
         }
 
-        (self.received_frames, _) = self.received_frames.overflowing_add(1);
+        self.received_frames.set(received_frames + 1);
     }
+}
 
-    async fn send_text_frame<'d>(self: &mut Self, text_message: &str) -> Result<(), Error> {
-        let header = FrameHeader {
-            frame_type: FrameType::Text(false),
-            payload_len: text_message.as_bytes().len() as _,
-            mask_key: self.rng.next_u32().into(),
-        };
+async fn send_text_frame<'d>(
+    mut tx: &mut TcpSocketWrite<'d>,
+    rng: &mut SmallRng,
+    text_message: &str,
+) -> Result<(), Error> {
+    let header = FrameHeader {
+        frame_type: FrameType::Text(false),
+        payload_len: text_message.as_bytes().len() as _,
+        mask_key: rng.next_u32().into(),
+    };
 
-        info!("Sending text frame with payload \"{}\"", text_message);
-        header.send(&mut self.socket).await?;
-        header
-            .send_payload(&mut self.socket, text_message.as_bytes())
-            .await?;
+    info!("Sending text frame with payload \"{}\"", text_message);
+    header.send(&mut tx).await?;
+    header
+        .send_payload(&mut tx, text_message.as_bytes())
+        .await?;
 
-        return Ok(());
-    }
+    return Ok(());
 }
 
 #[derive(defmt::Format)]
