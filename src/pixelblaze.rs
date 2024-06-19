@@ -1,7 +1,7 @@
 use core::cmp::min;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::str::from_utf8;
-use core::u8;
+use core::{u8, usize};
 
 use defmt::{error, info, warn};
 use edge_http::io::client::Connection;
@@ -9,7 +9,7 @@ use edge_http::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN, NONCE_LEN};
 use edge_nal_embassy::TcpSocket;
 use edge_ws::{FrameHeader, FrameType};
 use embassy_net::driver::Driver;
-use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, RawMutex};
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
@@ -26,12 +26,18 @@ const PIXELBLAZE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 4, 1));
 const PIXELBLAZE_MSG_GET_CONFIG: &str = r#"{"getConfig":true}"#;
 const PIXELBLAZE_MSG_SEND_UPDATES: &str = r#"{"sendUpdates":true}"#;
 
-const N_SOCKETS: usize = 1;
+// allow max one open TCP socket
+const MAX_SOCKETS: usize = 1;
 
 pub(crate) enum PixelData {
     PreviewFrame(PreviewFrame),
 }
-pub(crate) static CHANNEL: Channel<CriticalSectionRawMutex, PixelData, 64> = Channel::new();
+pub(crate) const MAX_FRAMES: usize = 1; // max one frame waiting in channel
+pub(crate) static PIXELBLAZE_FRAME_CHANNEL: Channel<
+    CriticalSectionRawMutex,
+    PixelData,
+    MAX_FRAMES,
+> = Channel::new();
 
 #[derive(Debug, defmt::Format)]
 pub enum Error {
@@ -96,10 +102,10 @@ pub(crate) async fn pixelblaze_task(
 
     loop {
         info!("pixelblaze: connecting...");
-        let mut tcp = edge_nal_embassy::Tcp::<_, N_SOCKETS>::new(&stack, &tcpbuf);
+        let mut tcp = edge_nal_embassy::Tcp::<_, MAX_SOCKETS>::new(&stack, &tcpbuf);
         match PixelStreamer::connect(&mut tcp, &mut rng, &mut buf, &mut nonce).await {
             Ok(mut pixel_streamer) => {
-                if let Err(_) = pixel_streamer.communicate_ws().await {
+                if let Err(_) = pixel_streamer.communicate(&PIXELBLAZE_FRAME_CHANNEL).await {
                     warn!("pixelblaze: WS communication failed",);
                 }
             }
@@ -113,14 +119,16 @@ pub(crate) async fn pixelblaze_task(
 }
 
 struct PixelStreamer<'b> {
-    socket: TcpSocket<'b, N_SOCKETS, 1024, 1024>,
+    socket: TcpSocket<'b, MAX_SOCKETS, 1024, 1024>,
     buf: &'b mut [u8],
     rng: &'b mut SmallRng,
+    received_frames: u32,
+    dropped_frames: u32,
 }
 
 impl<'b> PixelStreamer<'b> {
     async fn connect<'d, D>(
-        tcp: &'d mut edge_nal_embassy::Tcp<'d, D, N_SOCKETS>,
+        tcp: &'d mut edge_nal_embassy::Tcp<'d, D, MAX_SOCKETS>,
         rng: &'d mut SmallRng,
         buf: &'d mut [u8],
         nonce: &'d mut [u8; NONCE_LEN],
@@ -157,20 +165,28 @@ impl<'b> PixelStreamer<'b> {
 
         let (socket, buf) = conn.release();
 
-        return Ok(PixelStreamer { socket, buf, rng });
+        return Ok(PixelStreamer {
+            socket,
+            buf,
+            rng,
+            received_frames: 0,
+            dropped_frames: 0,
+        });
     }
 
-    async fn communicate_ws(self: &mut Self) -> Result<(), Error> {
+    async fn communicate<M>(
+        self: &mut Self,
+        channel: &Channel<M, PixelData, MAX_FRAMES>,
+    ) -> Result<(), Error>
+    where
+        M: RawMutex,
+    {
         info!("pixelblaze: Connection upgraded to WS, starting traffic now");
-
-        let channel = CHANNEL.sender();
 
         // Sending data
 
         self.send_text_frame(PIXELBLAZE_MSG_GET_CONFIG).await?;
         self.send_text_frame(PIXELBLAZE_MSG_SEND_UPDATES).await?;
-
-        let mut received_preview_frames: u32 = 0;
 
         // receive loop
         loop {
@@ -195,24 +211,11 @@ impl<'b> PixelStreamer<'b> {
                     let t = PixelblazeMessageType::from(payload[0]);
                     if t == PixelblazeMessageType::PreviewFrame {
                         match PreviewFrame::try_from(payload) {
-                            Ok(preview_frame) => {
-                                if received_preview_frames % 200 == 0 {
-                                    info!(
-                                        "pixelblaze: Got PreviewFrame (sample {}) fragmented={}, payload={}",
-                                        received_preview_frames, fragmented, payload,
-                                    );
-                                }
-                                if let Err(_) =
-                                    channel.try_send(PixelData::PreviewFrame(preview_frame))
-                                {
-                                    error!("pixelblaze: failed sending preview frame: the channel is full.",)
-                                }
-                            }
+                            Ok(preview_frame) => self.handle_preview_frame(preview_frame, channel),
                             Err(e) => {
                                 error!("pixelblaze: Could not parse preview frame: {}", e)
                             }
                         }
-                        (received_preview_frames, _) = received_preview_frames.overflowing_add(1);
                     } else {
                         info!(
                             "pixelblaze: Got binary frame fragmented={}, type={} payload={}",
@@ -261,6 +264,28 @@ impl<'b> PixelStreamer<'b> {
                 warn!("pixelblaze: Got unexpected fragmented frame");
             }
         }
+    }
+
+    fn handle_preview_frame<M>(
+        self: &mut Self,
+        preview_frame: PreviewFrame,
+        channel: &Channel<M, PixelData, MAX_FRAMES>,
+    ) -> ()
+    where
+        M: RawMutex,
+    {
+        if self.received_frames % 200 == 0 {
+            info!(
+                "pixelblaze: Received PreviewFrame (sample {}): {}",
+                self.received_frames, preview_frame,
+            );
+        }
+
+        if let Err(_) = channel.try_send(PixelData::PreviewFrame(preview_frame)) {
+            (self.dropped_frames, _) = self.dropped_frames.overflowing_add(1);
+        }
+
+        (self.received_frames, _) = self.received_frames.overflowing_add(1);
     }
 
     async fn send_text_frame<'d>(self: &mut Self, text_message: &str) -> Result<(), Error> {

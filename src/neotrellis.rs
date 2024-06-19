@@ -6,7 +6,7 @@ use adafruit_seesaw::{
 use defmt::{info, Debug2Format};
 use embassy_time::{Duration, Timer};
 
-use crate::pixelblaze::{PixelData, CHANNEL, RGB};
+use crate::pixelblaze::{PixelData, PIXELBLAZE_FRAME_CHANNEL, RGB};
 
 pub(crate) const I2C_FREQUENCY: u32 = 100_000;
 
@@ -32,7 +32,7 @@ async fn drive_neotrellis<Seesaw: adafruit_seesaw::Driver>(
     seesaw: Seesaw,
 ) -> Result<(), SeesawError<Seesaw::Error>> {
     let mut neotrellis = NeoTrellis::new_with_default_addr(seesaw).init()?;
-    let receiver = CHANNEL.receiver();
+    let receiver = PIXELBLAZE_FRAME_CHANNEL.receiver();
 
     loop {
         let PixelData::PreviewFrame(preview_frame) = receiver.receive().await;
