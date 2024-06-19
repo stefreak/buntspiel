@@ -10,7 +10,7 @@ mod wifi;
 use defmt::{info, unwrap};
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::{i2c, multicore::spawn_core1};
-use neotrellis::neotrellis_task;
+use neotrellis::{neotrellis_task, I2C_FREQUENCY};
 use pixelblaze::pixelblaze_task;
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
 use static_cell::StaticCell;
@@ -55,7 +55,7 @@ async fn main(spawner: Spawner) {
 
             executor.run(|spawner| {
                 let mut config = i2c::Config::default();
-                config.frequency = 20_000;
+                config.frequency = I2C_FREQUENCY;
                 let i2c = i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, config);
 
                 // TODO: Improve efficiancy by driving neotrellis asynchronously.

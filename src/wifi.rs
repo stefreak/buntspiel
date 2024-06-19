@@ -7,7 +7,7 @@ use embassy_rp::{
     peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0},
     pio::{InterruptHandler, Pio},
 };
-use embassy_time::{Duration, Timer};
+use embassy_time::Timer;
 use static_cell::StaticCell;
 
 bind_interrupts!(struct Irqs {
@@ -66,7 +66,22 @@ pub(crate) async fn init_wifi(
     ));
 
     unwrap!(spawner.spawn(net_task(stack)));
-    unwrap!(spawner.spawn(control_task(control, stack)));
+
+    info!("Joining network {}...", WIFI_NETWORK);
+    //control.join_open(WIFI_NETWORK).await;
+    match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
+        Ok(_) => info!("join successful"),
+        Err(err) => {
+            info!("join failed with status={}", err.status);
+        }
+    }
+
+    // Wait for DHCP, not necessary when using static IP
+    info!("waiting for DHCP...");
+    while !stack.is_config_up() {
+        Timer::after_millis(500).await;
+    }
+    info!("DHCP is now up!");
 
     return stack;
 }
@@ -81,30 +96,4 @@ async fn wifi_task(
 #[embassy_executor::task]
 async fn net_task(stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>) -> ! {
     stack.run().await
-}
-
-#[embassy_executor::task]
-async fn control_task(
-    mut control: cyw43::Control<'static>,
-    stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
-) {
-    info!("Joining network {}...", WIFI_NETWORK);
-    //control.join_open(WIFI_NETWORK).await;
-    match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
-        Ok(_) => info!("join successful"),
-        Err(err) => {
-            info!("join failed with status={}", err.status);
-        }
-    }
-
-    // Wait for DHCP, not necessary when using static IP
-    info!("waiting for DHCP...");
-    while !stack.is_config_up() {
-        Timer::after_millis(100).await;
-        control.gpio_set(0, true).await;
-        Timer::after(Duration::from_millis(100)).await;
-        control.gpio_set(0, false).await;
-        Timer::after(Duration::from_millis(100)).await;
-    }
-    info!("DHCP is now up!");
 }
