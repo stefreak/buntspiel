@@ -9,7 +9,7 @@ use edge_http::ws::{MAX_BASE64_KEY_LEN, MAX_BASE64_KEY_RESPONSE_LEN, NONCE_LEN};
 use edge_nal_embassy::TcpSocket;
 use edge_ws::{FrameHeader, FrameType};
 use embassy_net::driver::Driver;
-use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
+use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
 use heapless::Vec;
@@ -31,7 +31,7 @@ const N_SOCKETS: usize = 1;
 pub(crate) enum PixelData {
     PreviewFrame(PreviewFrame),
 }
-pub(crate) static CHANNEL: Channel<ThreadModeRawMutex, PixelData, 64> = Channel::new();
+pub(crate) static CHANNEL: Channel<CriticalSectionRawMutex, PixelData, 64> = Channel::new();
 
 #[derive(Debug, defmt::Format)]
 pub enum Error {
