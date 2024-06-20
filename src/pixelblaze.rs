@@ -324,10 +324,9 @@ impl<'b> PixelStreamer {
             match header.frame_type {
                 FrameType::Text(_) => {
                     if let Ok(payload_str) = from_utf8(payload) {
-                        if payload_str.starts_with(r#"{"fps""#) {
-                            // TODO: Handle FPS status frames
-                            // If statement here is so it does not spam the logs so much
-                        } else {
+                        // TODO: Handle FPS status frames
+                        // If statement here is so it does not spam the logs so much
+                        if !payload_str.starts_with(r#"{"fps""#) {
                             info!("pixelblaze: Got text frame payload={}", payload_str,);
                         }
                     } else {

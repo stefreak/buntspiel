@@ -3,6 +3,7 @@
 #![allow(async_fn_in_trait)]
 #![feature(impl_trait_in_assoc_type)]
 
+mod animate;
 mod neotrellis;
 mod pixelblaze;
 mod wifi;

@@ -2,6 +2,7 @@ use cyw43::Control;
 use cyw43_pio::PioSpi;
 use defmt::{info, unwrap};
 use embassy_executor::Spawner;
+use embassy_futures::select::select;
 use embassy_rp::{
     bind_interrupts,
     gpio::{Level, Output},
@@ -10,6 +11,8 @@ use embassy_rp::{
 };
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
+
+use crate::animate::wait_animation;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => InterruptHandler<PIO0>;
@@ -73,30 +76,27 @@ pub(crate) async fn init_wifi(
     return stack;
 }
 
-async fn wait_for_network<'d>(
+async fn connect_to_wifi<'d>(
     control: &'d mut Control<'static>,
     stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
 ) {
-    // TODO: send neotrellis::Control messages to inform user about Wifi status
-    while !stack.is_config_up() {
-        info!("Joining network {}...", WIFI_NETWORK);
-        match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
-            Ok(_) => {
-                info!("join successful");
-            }
-            Err(err) => {
-                info!("join failed with status={}", err.status);
-                continue;
-            }
+    info!("Joining network {}...", WIFI_NETWORK);
+    match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {
+        Ok(_) => {
+            info!("join successful");
         }
-
-        // Wait for DHCP, not necessary when using static IP
-        info!("waiting for DHCP...");
-        while !stack.is_config_up() {
-            Timer::after_millis(500).await;
+        Err(err) => {
+            info!("join failed with status={}", err.status);
+            return;
         }
-        info!("DHCP is now up!");
     }
+
+    // Wait for DHCP, not necessary when using static IP
+    info!("waiting for DHCP...");
+    while !stack.is_config_up() {
+        Timer::after_millis(500).await;
+    }
+    info!("DHCP is now up!");
 }
 
 #[embassy_executor::task]
@@ -117,7 +117,21 @@ async fn control_task(
     stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
 ) -> ! {
     loop {
-        wait_for_network(&mut control, stack).await;
-        Timer::after(Duration::from_secs(2)).await;
+        if stack.is_config_up() {
+            Timer::after(Duration::from_secs(2)).await;
+            continue;
+        }
+
+        // play wait animation while connecting to a wifi
+        select(
+            async {
+                while !stack.is_config_up() {
+                    connect_to_wifi(&mut control, stack).await;
+                    Timer::after(Duration::from_secs(2)).await;
+                }
+            },
+            wait_animation(),
+        )
+        .await;
     }
 }
