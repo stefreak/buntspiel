@@ -68,7 +68,6 @@ pub(crate) async fn init_wifi(
 
     unwrap!(spawner.spawn(net_task(stack)));
 
-    wait_for_network(&mut control, stack).await;
     unwrap!(spawner.spawn(control_task(control, stack)));
 
     return stack;
@@ -78,6 +77,7 @@ async fn wait_for_network<'d>(
     control: &'d mut Control<'static>,
     stack: &'static embassy_net::Stack<cyw43::NetDriver<'static>>,
 ) {
+    // TODO: send neotrellis::Control messages to inform user about Wifi status
     while !stack.is_config_up() {
         info!("Joining network {}...", WIFI_NETWORK);
         match control.join_wpa2(WIFI_NETWORK, WIFI_PASSWORD).await {

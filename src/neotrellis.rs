@@ -4,9 +4,25 @@ use adafruit_seesaw::{
     SeesawError, SeesawRefCell,
 };
 use defmt::{info, Debug2Format};
+use embassy_sync::{blocking_mutex::raw::CriticalSectionRawMutex, channel::Channel};
 use embassy_time::{Duration, Timer};
 
-use crate::pixelblaze::{PixelData, PIXELBLAZE_FRAME_CHANNEL, RGB};
+pub(crate) const NEOTRELLIS_PIXELS: usize = 16;
+
+#[derive(defmt::Format, Default)]
+pub(crate) struct RGB {
+    pub(crate) r: u8,
+    pub(crate) g: u8,
+    pub(crate) b: u8,
+}
+
+pub(crate) enum Control {
+    SyncFrame([RGB; NEOTRELLIS_PIXELS]),
+}
+
+pub(crate) const MAX_CONTROL: usize = 5; // max 5 control messages waiting
+pub(crate) static CONTROL_CHANNEL: Channel<CriticalSectionRawMutex, Control, MAX_CONTROL> =
+    Channel::new();
 
 pub(crate) const I2C_FREQUENCY: u32 = 100_000;
 
@@ -32,12 +48,12 @@ async fn drive_neotrellis<Seesaw: adafruit_seesaw::Driver>(
     seesaw: Seesaw,
 ) -> Result<(), SeesawError<Seesaw::Error>> {
     let mut neotrellis = NeoTrellis::new_with_default_addr(seesaw).init()?;
-    let receiver = PIXELBLAZE_FRAME_CHANNEL.receiver();
+    let receiver = CONTROL_CHANNEL.receiver();
 
     loop {
-        let PixelData::PreviewFrame(preview_frame) = receiver.receive().await;
+        let Control::SyncFrame(preview_frame) = receiver.receive().await;
 
-        for (n, RGB { r, g, b }) in preview_frame.relevant_pixels.iter().enumerate() {
+        for (n, RGB { r, g, b }) in preview_frame.iter().enumerate() {
             neotrellis.set_nth_neopixel_color(
                 n.try_into().expect("Failed to convert pixel index"),
                 *r,

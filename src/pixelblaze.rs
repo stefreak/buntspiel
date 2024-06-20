@@ -1,7 +1,7 @@
 use core::cell::Cell;
 use core::cmp::min;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
-use core::str::from_utf8;
+use core::str::{from_utf8, FromStr};
 use core::{u8, usize};
 use edge_net::nal::TcpSplit;
 use futures::try_join;
@@ -15,10 +15,10 @@ use embassy_net::driver::Driver;
 use embassy_sync::blocking_mutex::raw::CriticalSectionRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, Timer};
-use heapless::Vec;
+use heapless::String;
 use rand::{rngs::SmallRng, RngCore};
 
-const BUNTSPIEL_PIXELS: usize = 16;
+use crate::neotrellis::{self, NEOTRELLIS_PIXELS, RGB};
 
 const PIXELBLAZE_WS_HOST: &str = "192.168.4.1:81";
 const PIXELBLAZE_WS_ORIGIN: &str = "http://192.168.4.1";
@@ -29,26 +29,17 @@ const PIXELBLAZE_IP: IpAddr = IpAddr::V4(Ipv4Addr::new(192, 168, 4, 1));
 // allow max one open TCP socket
 const MAX_SOCKETS: usize = 1;
 
-pub(crate) enum PixelData {
-    PreviewFrame(PreviewFrame),
-}
-pub(crate) const MAX_FRAMES: usize = 1; // max one frame waiting in channel
-pub(crate) static PIXELBLAZE_FRAME_CHANNEL: Channel<
-    CriticalSectionRawMutex,
-    PixelData,
-    MAX_FRAMES,
-> = Channel::new();
-
 const MAX_CONTROL: usize = 32; // max control messages waiting in channel
-pub(crate) enum PixelblazeControl {
+pub(crate) enum Control {
     SendPong,
     SubscribePreviewFrames,
     GetConfig,
     Close,
+    SetPattern,
 }
 pub(crate) static PIXELBLAZE_CONTROL_CHANNEL: Channel<
     CriticalSectionRawMutex,
-    PixelblazeControl,
+    Control,
     MAX_CONTROL,
 > = Channel::new();
 
@@ -133,6 +124,8 @@ pub(crate) async fn pixelblaze_task(
 }
 
 struct PixelStreamer {
+    current_pattern_id: Cell<Option<String<17>>>,
+    current_pattern_name: Cell<Option<String<50>>>,
     received_frames: Cell<u64>,
     dropped_frames: Cell<u64>,
 }
@@ -177,6 +170,8 @@ impl<'b> PixelStreamer {
 
         return Ok((
             PixelStreamer {
+                current_pattern_name: Cell::new(None),
+                current_pattern_id: Cell::new(None),
                 received_frames: Cell::new(0),
                 dropped_frames: Cell::new(0),
             },
@@ -208,14 +203,20 @@ impl<'b> PixelStreamer {
     async fn monitoring_loop(self: &Self) -> Result<(), Error> {
         let control_commands = PIXELBLAZE_CONTROL_CHANNEL.sender();
 
-        // Ask for config first thing in the morning
-        control_commands.send(PixelblazeControl::GetConfig).await;
+        // init sequence
+        Timer::after_millis(500).await;
+        control_commands.send(Control::GetConfig).await;
+        Timer::after_millis(500).await;
+        // TODO: Only do this if GetConfig did not reveal an active pattern:
+        // INFO  pixelblaze: Got text frame payload={"activeProgram":{"name":"","activeProgramId":null,"controls":{}},"sequencerMode":2,"runSequencer":true}
+        // TODO: Why doesn't it work?
+        //control_commands.send(Control::SetPattern).await;
 
         let mut last_received_frames: u64 = 0;
         let mut last_dropped_frames: u64 = 0;
 
         loop {
-            Timer::after_millis(1000).await;
+            Timer::after_millis(10000).await;
 
             // calculate received fps
             let new_received_frames = self.received_frames.get();
@@ -225,14 +226,20 @@ impl<'b> PixelStreamer {
             let fps_dropped = new_dropped_frames - last_dropped_frames;
             last_dropped_frames = new_dropped_frames;
 
-            info!(
-                "pixelblaze: received {} frames (dropped {} frames)",
-                fps_received, fps_dropped,
-            );
-
             if fps_received < 1 {
                 // use try_send to keep FPS timing accuracy
-                _ = control_commands.try_send(PixelblazeControl::SubscribePreviewFrames)
+                _ = control_commands.try_send(Control::SubscribePreviewFrames);
+                warn!(
+                    "pixelblaze: Low Average FPS (rx={} dropped={})",
+                    fps_received / 10,
+                    fps_dropped / 10,
+                );
+            } else {
+                info!(
+                    "pixelblaze: Average FPS rx={} dropped={}",
+                    fps_received / 10,
+                    fps_dropped / 10,
+                );
             }
         }
     }
@@ -249,7 +256,7 @@ impl<'b> PixelStreamer {
 
         loop {
             match control_commands.receive().await {
-                PixelblazeControl::SendPong => {
+                Control::SendPong => {
                     info!("pixelblaze: Sending pong");
                     let header = FrameHeader {
                         frame_type: FrameType::Pong,
@@ -258,13 +265,29 @@ impl<'b> PixelStreamer {
                     };
                     header.send(&mut tx).await?;
                 }
-                PixelblazeControl::SubscribePreviewFrames => {
+                Control::SubscribePreviewFrames => {
                     send_text_frame(&mut tx, &mut rng, r#"{"sendUpdates":true}"#).await?;
                 }
-                PixelblazeControl::GetConfig => {
+                Control::GetConfig => {
                     send_text_frame(&mut tx, &mut rng, r#"{"getConfig":true}"#).await?;
                 }
-                PixelblazeControl::Close => {
+                Control::SetPattern => {
+                    send_text_frame(
+                    &mut tx,
+                    &mut rng,
+                    r#"{"pause":true,"setCode":{"size":388,"crc":3538523514,"name":"Editor: blink fade","id":"kuJfFyCSkCKNasyNE"}}"#,
+                ).await?;
+                    self.current_pattern_name
+                        .replace(Some(String::from_str("Editor: blink fade").unwrap()));
+                    self.current_pattern_id
+                        .replace(Some(String::from_str("kuJfFyCSkCKNasyNE").unwrap()));
+
+                    Timer::after_millis(100).await;
+                    send_text_frame(&mut tx, &mut rng, r#"{"setControls":{}}"#).await?;
+                    Timer::after_millis(100).await;
+                    send_text_frame(&mut tx, &mut rng, r#"{"pause":false}"#).await?;
+                }
+                Control::Close => {
                     // Inform the server we are closing the connection
                     let header: FrameHeader = FrameHeader {
                         frame_type: FrameType::Close,
@@ -301,7 +324,12 @@ impl<'b> PixelStreamer {
             match header.frame_type {
                 FrameType::Text(_) => {
                     if let Ok(payload_str) = from_utf8(payload) {
-                        info!("pixelblaze: Got text frame payload={}", payload_str,);
+                        if payload_str.starts_with(r#"{"fps""#) {
+                            // TODO: Handle FPS status frames
+                            // If statement here is so it does not spam the logs so much
+                        } else {
+                            info!("pixelblaze: Got text frame payload={}", payload_str,);
+                        }
                     } else {
                         info!(
                             "pixelblaze: Got text frame (UTF8 decoding failed) payload={}",
@@ -312,8 +340,10 @@ impl<'b> PixelStreamer {
                 FrameType::Binary(_) => {
                     let t = PixelblazeMessageType::from(payload[0]);
                     if t == PixelblazeMessageType::PreviewFrame {
-                        match PreviewFrame::try_from(payload) {
-                            Ok(preview_frame) => self.handle_preview_frame(preview_frame),
+                        match neotrellis::Control::try_from(payload) {
+                            Ok(neotrellis::Control::SyncFrame(frame)) => {
+                                self.handle_preview_frame(frame)
+                            }
                             Err(e) => {
                                 error!("pixelblaze: Could not parse preview frame: {}", e)
                             }
@@ -327,14 +357,14 @@ impl<'b> PixelStreamer {
                 }
                 FrameType::Ping => {
                     info!("pixelblaze: Got ping frame",);
-                    control_commands.send(PixelblazeControl::SendPong).await;
+                    control_commands.send(Control::SendPong).await;
                 }
                 FrameType::Pong => {
                     info!("pixelblaze: Got pong frame",);
                 }
                 FrameType::Close => {
                     info!("pixelblaze: Got close frame",);
-                    control_commands.send(PixelblazeControl::Close).await;
+                    control_commands.send(Control::Close).await;
                 }
                 FrameType::Continue(is_final) => {
                     warn!(
@@ -346,22 +376,22 @@ impl<'b> PixelStreamer {
         }
     }
 
-    fn handle_preview_frame(self: &Self, preview_frame: PreviewFrame) -> () {
-        let preview_frames = PIXELBLAZE_FRAME_CHANNEL.sender();
+    fn handle_preview_frame(self: &Self, frame: [RGB; NEOTRELLIS_PIXELS]) -> () {
+        // Uncomment if you want to see raw frames in log output
+        // if received_frames % 200 == 0 {
+        //     info!(
+        //         "pixelblaze: Received PreviewFrame (sample {}): {}",
+        //         self.received_frames, frame,
+        //     );
+        // }
 
         let received_frames = self.received_frames.get();
-        if received_frames % 200 == 0 {
-            info!(
-                "pixelblaze: Received PreviewFrame (sample {}): {}",
-                self.received_frames, preview_frame,
-            );
-        }
+        self.received_frames.set(received_frames + 1);
 
-        if let Err(_) = preview_frames.try_send(PixelData::PreviewFrame(preview_frame)) {
+        if let Err(_) = neotrellis::CONTROL_CHANNEL.try_send(neotrellis::Control::SyncFrame(frame))
+        {
             self.dropped_frames.set(self.dropped_frames.get() + 1)
         }
-
-        self.received_frames.set(received_frames + 1);
     }
 }
 
@@ -386,24 +416,11 @@ async fn send_text_frame<'d>(
 }
 
 #[derive(defmt::Format)]
-pub(crate) struct RGB {
-    pub(crate) r: u8,
-    pub(crate) g: u8,
-    pub(crate) b: u8,
-}
-
-#[derive(defmt::Format)]
 pub(crate) enum PreviewFrameErr {
     Invalid,
-    Overflow,
 }
 
-#[derive(defmt::Format)]
-pub(crate) struct PreviewFrame {
-    pub(crate) relevant_pixels: Vec<RGB, BUNTSPIEL_PIXELS>,
-}
-
-impl TryFrom<&[u8]> for PreviewFrame {
+impl TryFrom<&[u8]> for neotrellis::Control {
     type Error = PreviewFrameErr;
 
     fn try_from(value: &[u8]) -> Result<Self, Self::Error> {
@@ -419,22 +436,17 @@ impl TryFrom<&[u8]> for PreviewFrame {
             return Err(PreviewFrameErr::Invalid);
         }
 
-        let mut preview_frame = PreviewFrame {
-            relevant_pixels: Vec::new(),
-        };
+        let mut preview_frame: [RGB; NEOTRELLIS_PIXELS] = Default::default();
+
         let pixels = rgb_bytes / 3;
-        for p in 0..min(BUNTSPIEL_PIXELS, pixels) {
-            let position = p * 3;
+        for i in 0..min(NEOTRELLIS_PIXELS, pixels) {
+            let position = i * 3;
             let [r, g, b] = value[position..position + 3] else {
                 return Err(PreviewFrameErr::Invalid);
             };
-            if let Err(_) = preview_frame.relevant_pixels.push(RGB { r, g, b }) {
-                return Err(PreviewFrameErr::Overflow);
-            }
+            preview_frame[i] = RGB { r, g, b }
         }
 
-        return Ok(preview_frame);
+        return Ok(neotrellis::Control::SyncFrame(preview_frame));
     }
 }
-
-impl PreviewFrame {}
