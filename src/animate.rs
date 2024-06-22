@@ -1,7 +1,7 @@
 use defmt::info;
 use embassy_time::{Duration, Timer};
 
-use crate::neotrellis::{self, NEOTRELLIS_PIXELS, RGB};
+use crate::neotrellis::{self, Rgb, NEOTRELLIS_PIXELS};
 
 pub(crate) struct RGBPattern {
     pub(crate) r1: &'static str,
@@ -12,51 +12,50 @@ pub(crate) struct RGBPattern {
 
 const BRIGHTNESS: u8 = 20;
 
-impl Into<[RGB; NEOTRELLIS_PIXELS]> for RGBPattern {
-    fn into(self) -> [RGB; NEOTRELLIS_PIXELS] {
+impl From<RGBPattern> for [Rgb; NEOTRELLIS_PIXELS] {
+    fn from(val: RGBPattern) -> Self {
         let to_rgb = |p: char| {
             if p == 'w' || p == 'x' {
-                return RGB {
+                return Rgb {
                     r: BRIGHTNESS,
                     g: BRIGHTNESS,
                     b: BRIGHTNESS,
                 };
             }
             if p == 'r' {
-                return RGB {
+                return Rgb {
                     r: BRIGHTNESS,
                     g: 0,
                     b: 0,
                 };
             }
             if p == 'g' {
-                return RGB {
+                return Rgb {
                     r: 0,
                     g: BRIGHTNESS,
                     b: 0,
                 };
             }
             if p == 'b' {
-                return RGB {
+                return Rgb {
                     r: 0,
                     g: 0,
                     b: BRIGHTNESS,
                 };
             }
-            return RGB { r: 0, g: 0, b: 0 };
+            Rgb { r: 0, g: 0, b: 0 }
         };
 
-        let mut frame = <[RGB; NEOTRELLIS_PIXELS]>::default();
+        let mut frame = <[Rgb; NEOTRELLIS_PIXELS]>::default();
 
-        for (i, pixel) in self
+        for (i, pixel) in val
             .r1
             .chars()
             .take(4)
             .map(to_rgb)
-            .chain(self.r2.chars().take(4).map(to_rgb))
-            .chain(self.r3.chars().take(4).map(to_rgb))
-            .chain(self.r4.chars().take(4).map(to_rgb))
-            .into_iter()
+            .chain(val.r2.chars().take(4).map(to_rgb))
+            .chain(val.r3.chars().take(4).map(to_rgb))
+            .chain(val.r4.chars().take(4).map(to_rgb))
             .enumerate()
         {
             if i >= NEOTRELLIS_PIXELS {
@@ -64,7 +63,7 @@ impl Into<[RGB; NEOTRELLIS_PIXELS]> for RGBPattern {
             }
             frame[i] = pixel
         }
-        return frame;
+        frame
     }
 }
 

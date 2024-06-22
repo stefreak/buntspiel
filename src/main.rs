@@ -8,9 +8,17 @@ mod neotrellis;
 mod pixelblaze;
 mod wifi;
 
+use cyw43_pio::PioSpi;
 use defmt::{info, unwrap};
 use embassy_executor::{Executor, Spawner};
-use embassy_rp::{i2c, multicore::spawn_core1};
+use embassy_rp::{
+    bind_interrupts,
+    gpio::{Level, Output},
+    i2c,
+    multicore::spawn_core1,
+    peripherals::{DMA_CH0, PIO0},
+    pio::{self, Pio},
+};
 use neotrellis::{neotrellis_task, I2C_FREQUENCY};
 use pixelblaze::pixelblaze_task;
 use rand::{rngs::SmallRng, RngCore, SeedableRng};
@@ -21,6 +29,10 @@ use {defmt_rtt as _, panic_probe as _};
 static mut CORE1_STACK: embassy_rp::multicore::Stack<4096> = embassy_rp::multicore::Stack::new();
 static CORE1_EXECUTOR: StaticCell<Executor> = StaticCell::new();
 
+bind_interrupts!(struct Irqs {
+    PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
+});
+
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("Hello World!");
@@ -29,23 +41,23 @@ async fn main(spawner: Spawner) {
 
     let p = embassy_rp::init(Default::default());
 
-    let net_stack = init_wifi(
-        spawner,
-        p.PIN_23,
-        p.PIN_25,
-        p.PIO0,
+    let pwr = Output::new(p.PIN_23, Level::Low);
+    let cs = Output::new(p.PIN_25, Level::High);
+    let mut pio = Pio::new(p.PIO0, Irqs);
+    let spi: PioSpi<PIO0, 0, DMA_CH0> = PioSpi::new(
+        &mut pio.common,
+        pio.sm0,
+        pio.irq0,
+        cs,
         p.PIN_24,
         p.PIN_29,
         p.DMA_CH0,
-        rng.next_u64(),
-    )
-    .await;
+    );
+
+    let net_stack = init_wifi(spawner, spi, pwr, rng.next_u64()).await;
 
     // Pixelblaze websocket
-    unwrap!(spawner.spawn(pixelblaze_task(
-        net_stack,
-        SmallRng::from_rng(&mut rng).expect("Failed to create rng for pixelblaze_task")
-    )));
+    unwrap!(spawner.spawn(pixelblaze_task(net_stack, rng,)));
 
     // Non-Async code runs in a thread on the second CPU core
     spawn_core1(

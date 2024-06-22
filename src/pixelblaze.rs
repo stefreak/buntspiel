@@ -2,7 +2,6 @@ use core::cell::Cell;
 use core::cmp::min;
 use core::net::{IpAddr, Ipv4Addr, SocketAddr};
 use core::str::{from_utf8, FromStr};
-use core::{u8, usize};
 use edge_net::nal::TcpSplit;
 use futures::try_join;
 
@@ -18,7 +17,7 @@ use embassy_time::{Duration, Timer};
 use heapless::String;
 use rand::{rngs::SmallRng, RngCore};
 
-use crate::neotrellis::{self, NEOTRELLIS_PIXELS, RGB};
+use crate::neotrellis::{self, Rgb, NEOTRELLIS_PIXELS};
 
 const PIXELBLAZE_WS_HOST: &str = "192.168.4.1:81";
 const PIXELBLAZE_WS_ORIGIN: &str = "http://192.168.4.1";
@@ -35,7 +34,7 @@ pub(crate) enum Control {
     SubscribePreviewFrames,
     GetConfig,
     Close,
-    SetPattern,
+    SetActivePattern,
 }
 pub(crate) static PIXELBLAZE_CONTROL_CHANNEL: Channel<
     CriticalSectionRawMutex,
@@ -83,14 +82,14 @@ pub enum PixelblazeMessageType {
 impl From<u8> for PixelblazeMessageType {
     fn from(value: u8) -> Self {
         match value {
-            01 => Self::PutSourceCode,
-            03 => Self::PutByteCode,
-            04 => Self::PreviewImage,
-            05 => Self::PreviewFrame,
-            06 => Self::GetSourceCode,
-            07 => Self::GetProgramList,
-            08 => Self::PutPixelMap,
-            09 => Self::ExpanderConfig,
+            1 => Self::PutSourceCode,
+            3 => Self::PutByteCode,
+            4 => Self::PreviewImage,
+            5 => Self::PreviewFrame,
+            6 => Self::GetSourceCode,
+            7 => Self::GetProgramList,
+            8 => Self::PutPixelMap,
+            9 => Self::ExpanderConfig,
             v => Self::Unknown(v),
         }
     }
@@ -107,10 +106,14 @@ pub(crate) async fn pixelblaze_task(
 
     loop {
         info!("pixelblaze: connecting...");
-        let mut tcp = edge_nal_embassy::Tcp::<_, MAX_SOCKETS>::new(&stack, &tcpbuf);
+        let mut tcp = edge_nal_embassy::Tcp::<_, MAX_SOCKETS>::new(stack, &tcpbuf);
         match PixelStreamer::connect(&mut tcp, rng.clone(), &mut buf, &mut nonce).await {
             Ok((pixel_streamer, socket)) => {
-                if let Err(_) = pixel_streamer.communicate(socket, rng.clone()).await {
+                if pixel_streamer
+                    .communicate(socket, rng.clone())
+                    .await
+                    .is_err()
+                {
                     warn!("pixelblaze: WS communication failed",);
                 }
             }
@@ -156,7 +159,7 @@ impl<'b> PixelStreamer {
         .await?;
         conn.initiate_response().await?;
         let mut buf = [0_u8; MAX_BASE64_KEY_RESPONSE_LEN];
-        if !conn.is_ws_upgrade_accepted(&nonce, &mut buf)? {
+        if !conn.is_ws_upgrade_accepted(nonce, &mut buf)? {
             warn!("pixelblaze: WS upgrade not accepted");
             return Err(Error::Error);
         }
@@ -168,7 +171,7 @@ impl<'b> PixelStreamer {
 
         let (socket, _) = conn.release();
 
-        return Ok((
+        Ok((
             PixelStreamer {
                 current_pattern_name: Cell::new(None),
                 current_pattern_id: Cell::new(None),
@@ -176,11 +179,11 @@ impl<'b> PixelStreamer {
                 dropped_frames: Cell::new(0),
             },
             socket,
-        ));
+        ))
     }
 
     async fn communicate(
-        self: &Self,
+        &self,
         mut socket: TcpSocket<'b, MAX_SOCKETS, 1024, 1024>,
         rng: SmallRng,
     ) -> Result<(), Error> {
@@ -197,10 +200,10 @@ impl<'b> PixelStreamer {
         info!("pixelblaze: Closing connection");
         drop(socket);
 
-        return Ok(());
+        Ok(())
     }
 
-    async fn monitoring_loop(self: &Self) -> Result<(), Error> {
+    async fn monitoring_loop(&self) -> Result<(), Error> {
         let control_commands = PIXELBLAZE_CONTROL_CHANNEL.sender();
 
         // init sequence
@@ -210,7 +213,7 @@ impl<'b> PixelStreamer {
         // TODO: Only do this if GetConfig did not reveal an active pattern:
         // INFO  pixelblaze: Got text frame payload={"activeProgram":{"name":"","activeProgramId":null,"controls":{}},"sequencerMode":2,"runSequencer":true}
         // TODO: Why doesn't it work?
-        //control_commands.send(Control::SetPattern).await;
+        //control_commands.send(Control::SetActivePattern).await;
 
         let mut last_received_frames: u64 = 0;
         let mut last_dropped_frames: u64 = 0;
@@ -245,14 +248,14 @@ impl<'b> PixelStreamer {
     }
 
     async fn send_loop<'d>(
-        self: &Self,
+        &self,
         mut tx: TcpSocketWrite<'d>,
         mut rng: SmallRng,
     ) -> Result<(), Error> {
         let control_commands = PIXELBLAZE_CONTROL_CHANNEL.receiver();
 
         // Drain the control command queue when reconnecting.
-        while let Ok(_) = control_commands.try_receive() {}
+        while control_commands.try_receive().is_err() {}
 
         loop {
             match control_commands.receive().await {
@@ -271,12 +274,13 @@ impl<'b> PixelStreamer {
                 Control::GetConfig => {
                     send_text_frame(&mut tx, &mut rng, r#"{"getConfig":true}"#).await?;
                 }
-                Control::SetPattern => {
+                Control::SetActivePattern => {
                     send_text_frame(
-                    &mut tx,
-                    &mut rng,
-                    r#"{"pause":true,"setCode":{"size":388,"crc":3538523514,"name":"Editor: blink fade","id":"kuJfFyCSkCKNasyNE"}}"#,
-                ).await?;
+                        &mut tx,
+                        &mut rng,
+                        r#"{"setActivePattern":"kuJfFyCSkCKNasyNE"}"#,
+                    )
+                    .await?;
                     self.current_pattern_name
                         .replace(Some(String::from_str("Editor: blink fade").unwrap()));
                     self.current_pattern_id
@@ -304,7 +308,7 @@ impl<'b> PixelStreamer {
         }
     }
 
-    async fn receive_loop<'d>(self: &Self, mut rx: TcpSocketRead<'d>) -> Result<(), Error> {
+    async fn receive_loop<'d>(&self, mut rx: TcpSocketRead<'d>) -> Result<(), Error> {
         let mut buf = [0_u8; 2048];
 
         let control_commands = PIXELBLAZE_CONTROL_CHANNEL.sender();
@@ -375,7 +379,7 @@ impl<'b> PixelStreamer {
         }
     }
 
-    fn handle_preview_frame(self: &Self, frame: [RGB; NEOTRELLIS_PIXELS]) -> () {
+    fn handle_preview_frame(&self, frame: [Rgb; NEOTRELLIS_PIXELS]) {
         // Uncomment if you want to see raw frames in log output
         // if received_frames % 200 == 0 {
         //     info!(
@@ -387,7 +391,9 @@ impl<'b> PixelStreamer {
         let received_frames = self.received_frames.get();
         self.received_frames.set(received_frames + 1);
 
-        if let Err(_) = neotrellis::CONTROL_CHANNEL.try_send(neotrellis::Control::SyncFrame(frame))
+        if neotrellis::CONTROL_CHANNEL
+            .try_send(neotrellis::Control::SyncFrame(frame))
+            .is_err()
         {
             self.dropped_frames.set(self.dropped_frames.get() + 1)
         }
@@ -411,7 +417,7 @@ async fn send_text_frame<'d>(
         .send_payload(&mut tx, text_message.as_bytes())
         .await?;
 
-    return Ok(());
+    Ok(())
 }
 
 #[derive(defmt::Format)]
@@ -435,17 +441,19 @@ impl TryFrom<&[u8]> for neotrellis::Control {
             return Err(PreviewFrameErr::Invalid);
         }
 
-        let mut preview_frame: [RGB; NEOTRELLIS_PIXELS] = Default::default();
+        let mut preview_frame: [Rgb; NEOTRELLIS_PIXELS] = Default::default();
 
+        // use Iterator.collect once there is a good way to do it without using std
         let pixels = rgb_bytes / 3;
+        #[allow(clippy::needless_range_loop)]
         for i in 0..min(NEOTRELLIS_PIXELS, pixels) {
             let position = i * 3;
             let [r, g, b] = value[position..position + 3] else {
                 return Err(PreviewFrameErr::Invalid);
             };
-            preview_frame[i] = RGB { r, g, b }
+            preview_frame[i] = Rgb { r, g, b }
         }
 
-        return Ok(neotrellis::Control::SyncFrame(preview_frame));
+        Ok(neotrellis::Control::SyncFrame(preview_frame))
     }
 }

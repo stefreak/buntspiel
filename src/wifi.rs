@@ -4,46 +4,31 @@ use defmt::{info, unwrap};
 use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_rp::{
-    bind_interrupts,
-    gpio::{Level, Output},
-    peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0},
-    pio::{InterruptHandler, Pio},
+    gpio::Output,
+    peripherals::{DMA_CH0, PIO0},
 };
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
 
 use crate::animate::wait_animation;
 
-bind_interrupts!(struct Irqs {
-    PIO0_IRQ_0 => InterruptHandler<PIO0>;
-});
-
 const WIFI_NETWORK: &str = "Testturm2";
 const WIFI_PASSWORD: &str = "12345678";
 
 const MAX_SOCKETS: usize = 3;
 
-pub(crate) async fn init_wifi(
+pub(crate) async fn init_wifi<'a>(
     spawner: Spawner,
-    pwr: PIN_23,
-    cs: PIN_25,
-    pio0: PIO0,
-    dio: PIN_24,
-    clk: PIN_29,
-    dma: DMA_CH0,
+    spi: PioSpi<'static, PIO0, 0, DMA_CH0>,
+    pwr: Output<'static>,
     random_seed: u64,
 ) -> &'static embassy_net::Stack<cyw43::NetDriver<'static>> {
+    static STATE: StaticCell<cyw43::State> = StaticCell::new();
+    let state = STATE.init(cyw43::State::new());
+
     let fw = include_bytes!("../cyw43-firmware/43439A0.bin");
     let clm = include_bytes!("../cyw43-firmware/43439A0_clm.bin");
 
-    let pwr = Output::new(pwr, Level::Low);
-    let cs = Output::new(cs, Level::High);
-    let mut pio = Pio::new(pio0, Irqs);
-    let spi: PioSpi<PIO0, 0, DMA_CH0> =
-        PioSpi::new(&mut pio.common, pio.sm0, pio.irq0, cs, dio, clk, dma);
-
-    static STATE: StaticCell<cyw43::State> = StaticCell::new();
-    let state = STATE.init(cyw43::State::new());
     let (net_device, mut control, runner) = cyw43::new(state, pwr, spi, fw).await;
     unwrap!(spawner.spawn(wifi_task(runner)));
 
@@ -73,7 +58,7 @@ pub(crate) async fn init_wifi(
 
     unwrap!(spawner.spawn(control_task(control, stack)));
 
-    return stack;
+    stack
 }
 
 async fn connect_to_wifi<'d>(

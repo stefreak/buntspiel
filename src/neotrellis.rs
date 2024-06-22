@@ -10,14 +10,14 @@ use embassy_time::{Duration, Timer};
 pub(crate) const NEOTRELLIS_PIXELS: usize = 16;
 
 #[derive(defmt::Format, Default)]
-pub(crate) struct RGB {
+pub(crate) struct Rgb {
     pub(crate) r: u8,
     pub(crate) g: u8,
     pub(crate) b: u8,
 }
 
 pub(crate) enum Control {
-    SyncFrame([RGB; NEOTRELLIS_PIXELS]),
+    SyncFrame([Rgb; NEOTRELLIS_PIXELS]),
 }
 
 pub(crate) const MAX_CONTROL: usize = 5; // max 5 control messages waiting
@@ -53,7 +53,7 @@ async fn drive_neotrellis<Seesaw: adafruit_seesaw::Driver>(
     loop {
         let Control::SyncFrame(preview_frame) = receiver.receive().await;
 
-        for (n, RGB { r, g, b }) in preview_frame.iter().enumerate() {
+        for (n, Rgb { r, g, b }) in preview_frame.iter().enumerate() {
             neotrellis.set_nth_neopixel_color(
                 n.try_into().expect("Failed to convert pixel index"),
                 *r,
