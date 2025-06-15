@@ -1,0 +1,13 @@
+[package]
+name = "superpattern"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+ast-grep-core = "0.23.1"
+json = "0.12.4"
+regex = "1.10.5"
+tree-sitter-javascript = "0.21.3"
+
+[dev-dependencies]
+pretty_assertions = "1.4.0"

@@ -1,0 +1,13 @@
+{
+    "[rust]": {
+        "editor.defaultFormatter": "rust-lang.rust-analyzer",
+        "editor.formatOnSave": true
+    },
+    "rust-analyzer.cargo.features": "all",
+    "rust-analyzer.check.allTargets": true,
+    // "rust-analyzer.check.noDefaultFeatures": true,
+    // "rust-analyzer.cargo.noDefaultFeatures": true,
+    // "rust-analyzer.showUnlinkedFileNotification": false,
+    "rust-analyzer.cargo.target": "aarch64-apple-darwin",
+    // "rust-analyzer.procMacro.enable": true,
+}

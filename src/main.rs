@@ -72,7 +72,8 @@ async fn main(spawner: Spawner) {
                 let i2c = i2c::I2c::new_blocking(p.I2C1, p.PIN_7, p.PIN_6, config);
 
                 // TODO: Improve efficiancy by driving neotrellis asynchronously.
-                unwrap!(spawner.spawn(neotrellis_task(i2c)))
+                !todo!("call neotrellis_task")
+                // unwrap!(spawner.spawn(neotrellis_task(i2c)))
             });
         },
     );

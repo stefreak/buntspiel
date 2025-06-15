@@ -28,7 +28,7 @@ pub(crate) const I2C_FREQUENCY: u32 = 100_000;
 
 #[embassy_executor::task]
 pub(crate) async fn neotrellis_task(
-    i2c: embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C1, embassy_rp::i2c::Blocking>,
+    i2c: embassy_rp::i2c::I2c<'static, embassy_rp::peripherals::I2C1, embassy_rp::i2c::Async>,
 ) -> ! {
     let delay = embassy_time::Delay;
     let seesaw = SeesawRefCell::new(delay, i2c);

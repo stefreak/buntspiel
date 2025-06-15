@@ -7,13 +7,52 @@
 //! Cargo re-run the build script whenever `memory.x` is changed,
 //! updating `memory.x` ensures a rebuild of the application with the
 //! new memory settings.
-
-use std::env;
 use std::fs::File;
-use std::io::Write;
+use std::io::{Read, Write};
 use std::path::PathBuf;
+use std::{env, fs};
+
+use superpattern::transform_pattern;
 
 fn main() {
+    memory();
+    build_superpattern();
+}
+
+fn build_superpattern() {
+    println!("cargo:rerun-if-changed=superpattern/patterns");
+
+    for e in fs::read_dir("superpattern/patterns").unwrap().enumerate() {
+        let i = e.0;
+        let entry = e.1.unwrap();
+        let path = entry.path();
+
+        if path.extension().is_some_and(|e| e != "epe") {
+            continue;
+        }
+
+        let mut raw_json = String::new();
+        File::open(&path)
+            .expect("Failed to open")
+            .read_to_string(&mut raw_json)
+            .unwrap();
+        let pattern = json::parse(&raw_json.trim_matches(|t: char| !t.is_ascii()))
+            .map_err(|e| format!("failed to parse {:?}: {:?}", path, e))
+            .unwrap();
+        let str = pattern["sources"]["main"]
+            .as_str()
+            .expect("sources.main was not a string");
+
+        let res = transform_pattern(str);
+
+        _ = File::write_all(
+            &mut File::create(format!("superpattern/generated/generated-{}.js", i)).unwrap(),
+            res.transformed_pattern.as_bytes(),
+        );
+    }
+}
+
+fn memory() {
     // Put `memory.x` in our output directory and ensure it's
     // on the linker search path.
     let out = &PathBuf::from(env::var_os("OUT_DIR").unwrap());

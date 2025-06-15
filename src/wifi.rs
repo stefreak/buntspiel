@@ -5,7 +5,8 @@ use embassy_executor::Spawner;
 use embassy_futures::select::select;
 use embassy_rp::{
     gpio::Output,
-    peripherals::{DMA_CH0, PIO0},
+    peripherals::{DMA_CH0, PIN_23, PIN_24, PIN_25, PIN_29, PIO0},
+    pio::{InterruptHandler, Pio},
 };
 use embassy_time::{Duration, Timer};
 use static_cell::StaticCell;
