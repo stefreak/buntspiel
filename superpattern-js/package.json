@@ -1,0 +1,47 @@
+{
+  "name": "pixelblaze-superpattern-transform",
+  "version": "1.0.0",
+  "description": "JSCodeshift transformer to enable Pixelblaze pattern combination by isolating variable scopes",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "jest",
+    "demo": "node examples/demo.js"
+  },
+  "keywords": [
+    "jscodeshift",
+    "pixelblaze",
+    "ast",
+    "transformation",
+    "led",
+    "pattern",
+    "festival",
+    "codemod"
+  ],
+  "author": "Buntspiel Team",
+  "license": "MIT",
+  "dependencies": {
+    "jscodeshift": "^0.15.0"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "nodemon": "^3.0.0"
+  },
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-username/buntspiel.git",
+    "directory": "superpattern-js"
+  },
+  "bugs": {
+    "url": "https://github.com/your-username/buntspiel/issues"
+  },
+  "homepage": "https://github.com/your-username/buntspiel#readme",
+  "jest": {
+    "testEnvironment": "node",
+    "testMatch": [
+      "**/test/**/*.test.js"
+    ]
+  }
+}
