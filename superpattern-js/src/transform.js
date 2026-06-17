@@ -15,9 +15,7 @@ module.exports = function (fileInfo, api) {
   const j = api.jscodeshift;
   const root = j(fileInfo.source);
 
-  // =============================================================================
-  // STEP 1: ANALYZE AND COLLECT VARIABLES
-  // =============================================================================
+  // --- Step 1: Analyze and collect variables ---
 
   const stateVars = [];
   const globalVars = [];
@@ -93,9 +91,7 @@ module.exports = function (fileInfo, api) {
       }
     });
 
-  // =============================================================================
-  // STEP 2: TRANSFORM VARIABLE DECLARATIONS
-  // =============================================================================
+  // --- Step 2: Transform variable declarations ---
 
   // Transform state variable declarations to __state__ assignments
   root
@@ -171,11 +167,7 @@ module.exports = function (fileInfo, api) {
       }
     });
 
-  // =============================================================================
-  // STEP 6: TRANSFORM FUNCTION CALLS TO INCLUDE NEW PARAMETERS
-  // =============================================================================
-
-  // Add __state__ and __globals__ parameters to all functions
+  // --- Step 3: Transform function parameters ---
   root.find(j.Function).forEach((path) => {
     const stateParam = j.identifier("__state__");
     const globalsParam = j.identifier("__globals__");
@@ -184,9 +176,7 @@ module.exports = function (fileInfo, api) {
     path.value.params = [stateParam, globalsParam, ...path.value.params];
   });
 
-  // =============================================================================
-  // STEP 5: TRANSFORM VARIABLE REFERENCES IN FUNCTION BODIES
-  // =============================================================================
+  // --- Step 4: Transform variable references in function bodies ---
 
   root.find(j.Function).forEach((funcPath) => {
     // Collect all locally declared variables in this function
@@ -316,11 +306,7 @@ module.exports = function (fileInfo, api) {
       });
   });
 
-  // =============================================================================
-  // STEP 6: TRANSFORM FUNCTION CALLS TO INCLUDE NEW PARAMETERS
-  // =============================================================================
-
-  // Transform global assignments that are not inside functions
+  // --- Step 5: Transform global assignments at program level ---
   root
     .find(j.AssignmentExpression)
     .filter((path) => {
@@ -359,11 +345,7 @@ module.exports = function (fileInfo, api) {
       );
     });
 
-  // =============================================================================
-  // STEP 6: TRANSFORM FUNCTION CALLS TO INCLUDE NEW PARAMETERS
-  // =============================================================================
-
-  // Transform calls to transformed functions to include __state__ and __globals__
+  // --- Step 6: Transform function calls to include parameters ---
   root
     .find(j.CallExpression)
     .filter((path) => {
@@ -400,9 +382,7 @@ module.exports = function (fileInfo, api) {
       path.value.arguments = [stateArg, globalsArg, ...path.value.arguments];
     });
 
-  // =============================================================================
-  // STEP 7: TRANSFORM GLOBAL VARIABLE ASSIGNMENTS AT PROGRAM LEVEL
-  // =============================================================================
+  // --- Step 7: Transform global variable assignments at program level ---
 
   // Transform global assignments that are not inside functions
   root
@@ -443,9 +423,7 @@ module.exports = function (fileInfo, api) {
       );
     });
 
-  // =============================================================================
-  // RETURN TRANSFORMED SOURCE
-  // =============================================================================
+  // --- Return transformed source ---
 
   return root.toSource({
     quote: "single",

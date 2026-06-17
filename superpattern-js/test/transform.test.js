@@ -1,5 +1,5 @@
 const { defineInlineTest } = require("jscodeshift/dist/testUtils");
-const transform = require("../src/transform.js");
+const transform = require("../src/transform");
 
 // =============================================================================
 // BASIC VARIABLE DETECTION TESTS

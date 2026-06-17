@@ -100,7 +100,10 @@ function resolveFunctionCollisions(patterns, patternNames) {
       );
 
       // Replace function calls
-      const functionCallRegex = new RegExp(`\\b${functionName}\\s*\\(`, "g");
+      const functionCallRegex = new RegExp(
+        `\\b${functionName}\\s*\\(`,
+        "g",
+      );
       resolvedPattern = resolvedPattern.replace(
         functionCallRegex,
         `${prefix}_${functionName}(`,

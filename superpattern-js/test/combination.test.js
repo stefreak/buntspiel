@@ -1,17 +1,13 @@
-const jscodeshift = require("jscodeshift");
-const transform = require("../src/transform.js");
-const { extractJavaScriptFromEpe } = require("../src/parser.js");
 const {
+  extractJavaScriptFromEpe,
   detectFunctionCollisions,
   resolveFunctionCollisions,
-} = require("../src/collision-resolver.js");
-const { wrapPatternInConstructor } = require("../src/pattern-wrapper.js");
-const { combinePatterns } = require("../src/combiner.js");
-const { generateBlendFunction } = require("../src/blend-modes.js");
-const {
+  wrapPatternInConstructor,
+  combinePatterns,
+  generateBlendFunction,
   combineEpePatterns,
   transformAndWrapPattern,
-} = require("../src/index.js");
+} = require("../src/combiner.js");
 
 /**
  * Comprehensive Test Suite for Buntspiel Superpattern Combination System
@@ -316,7 +312,7 @@ describe("Pattern Combination System", () => {
         },
       };
 
-      const result = transformAndWrapPattern(complexEpe);
+      const result = combineEpePatterns([complexEpe], ["ADD"]);
 
       expect(result).toContain("__state__");
       expect(result).toContain("__globals__");
